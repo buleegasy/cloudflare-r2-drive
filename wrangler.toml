@@ -1,0 +1,7 @@
+name = "cloudflare-r2-drive"
+main = "index.js"
+compatibility_date = "2024-03-01"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "my-public-drive"
