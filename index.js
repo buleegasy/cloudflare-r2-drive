@@ -12,6 +12,32 @@ export default {
       });
     }
 
+    if (request.method === 'POST' && path === 'upload') {
+      const filename = request.headers.get('X-File-Name');
+      if (!filename) {
+        return new Response('Filename missing', { status: 400 });
+      }
+
+      const decodedFilename = decodeURIComponent(filename);
+
+      // 10GB Limit Check
+      const list = await env.BUCKET.list();
+      let totalSize = 0;
+      for (const obj of list.objects) {
+        totalSize += obj.size;
+      }
+
+      const MAX_SIZE = 10 * 1024 * 1024 * 1024; // 10 GB
+      const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
+
+      if (totalSize + contentLength > MAX_SIZE) {
+        return new Response('Storage limit exceeded (10GB max)', { status: 413 });
+      }
+
+      await env.BUCKET.put(decodedFilename, request.body);
+      return new Response('Upload successful', { status: 200 });
+    }
+
     if (request.method !== 'GET') {
       return new Response('Method Not Allowed', { status: 405 });
     }
@@ -178,9 +204,92 @@ function generateHTML(objects) {
       border-radius: 20px;
       overflow: hidden;
       box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-      transition: transform 0.3s ease, box-shadow 0.3s ease;
+      transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+      position: relative;
     }
 
+    .file-list-container.dragover {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.1);
+    }
+    
+    .upload-overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(15, 23, 42, 0.8);
+      backdrop-filter: blur(8px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+      z-index: 50;
+    }
+    
+    .file-list-container.dragover .upload-overlay {
+      opacity: 1;
+    }
+
+    .upload-overlay p {
+      margin-top: 1rem;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .action-bar {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 1rem;
+    }
+
+    .upload-btn {
+      background: rgba(56, 189, 248, 0.1);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 0.5rem 1.25rem;
+      border-radius: 999px;
+      font-family: inherit;
+      font-weight: 500;
+      font-size: 0.9rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: all 0.2s ease;
+    }
+
+    .upload-btn:hover {
+      background: rgba(56, 189, 248, 0.2);
+      transform: translateY(-1px);
+    }
+
+    .upload-btn:active {
+      transform: translateY(0);
+    }
+
+    #upload-input {
+      display: none;
+    }
+    
+    .progress-bar-container {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: rgba(255,255,255,0.1);
+      display: none;
+    }
+    
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 0.3s ease;
+    }
     .file-list-container:hover {
       box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.6);
     }
@@ -317,7 +426,19 @@ function generateHTML(objects) {
       <p>Secure, fast, and beautiful storage</p>
     </div>
     
-    <div class="file-list-container">
+    <div class="action-bar">
+      <input type="file" id="upload-input" multiple>
+      <button class="upload-btn" onclick="document.getElementById('upload-input').click()">
+        <svg style="width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4m14-7l-5-5m0 0l-5 5m5-5v12"/></svg>
+        Upload Files
+      </button>
+    </div>
+
+    <div class="file-list-container" id="drop-zone">
+      <div class="upload-overlay">
+         <svg style="width: 64px; height: 64px; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;" viewBox="0 0 24 24"><path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+         <p>Drop files to upload</p>
+      </div>
       <table class="file-list">
         <thead>
           <tr>
@@ -330,8 +451,104 @@ function generateHTML(objects) {
           ${listRows}
         </tbody>
       </table>
+      <div class="progress-bar-container" id="progress-container">
+         <div class="progress-bar" id="progress-bar"></div>
+      </div>
     </div>
   </div>
+
+  <script>
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('upload-input');
+    const progressContainer = document.getElementById('progress-container');
+    const progressBar = document.getElementById('progress-bar');
+    const uploadBtn = document.querySelector('.upload-btn');
+
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+      dropZone.addEventListener(eventName, preventDefaults, false);
+      document.body.addEventListener(eventName, preventDefaults, false);
+    });
+
+    function preventDefaults(e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+      dropZone.addEventListener(eventName, () => dropZone.classList.add('dragover'), false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      dropZone.addEventListener(eventName, () => dropZone.classList.remove('dragover'), false);
+    });
+
+    dropZone.addEventListener('drop', handleDrop, false);
+    fileInput.addEventListener('change', handleFileSelect, false);
+
+    function handleDrop(e) {
+      const dt = e.dataTransfer;
+      const files = dt.files;
+      handleFiles(files);
+    }
+
+    function handleFileSelect(e) {
+      const files = e.target.files;
+      handleFiles(files);
+    }
+
+    async function handleFiles(files) {
+      if (files.length === 0) return;
+      
+      progressContainer.style.display = 'block';
+      progressBar.style.width = '0%';
+      uploadBtn.disabled = true;
+      uploadBtn.style.opacity = '0.5';
+      uploadBtn.innerText = 'Uploading...';
+
+      let successCount = 0;
+      let failCount = 0;
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+          const response = await fetch('/upload', {
+            method: 'POST',
+            headers: {
+              'X-File-Name': encodeURIComponent(file.name),
+              'Content-Type': file.type || 'application/octet-stream',
+              'Content-Length': file.size.toString()
+            },
+            body: file
+          });
+
+          if (!response.ok) {
+            const err = await response.text();
+            throw new Error(err || 'Upload failed');
+          }
+          successCount++;
+        } catch (error) {
+          console.error('Error uploading', file.name, error);
+          alert(\`Failed to upload \${file.name}: \${error.message}\`);
+          failCount++;
+        }
+        
+        // Update progress
+        const percent = ((i + 1) / files.length) * 100;
+        progressBar.style.width = percent + '%';
+      }
+
+      uploadBtn.disabled = false;
+      uploadBtn.style.opacity = '1';
+      uploadBtn.innerHTML = '<svg style="width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;margin-right:0.5rem" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4m14-7l-5-5m0 0l-5 5m5-5v12"/></svg>Upload Files';
+      
+      setTimeout(() => {
+        progressContainer.style.display = 'none';
+        if (successCount > 0) {
+          window.location.reload();
+        }
+      }, 500);
+    }
+  </script>
 </body>
 </html>`;
 }
