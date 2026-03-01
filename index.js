@@ -41,7 +41,7 @@ function formatBytes(bytes, decimals = 2) {
 
 function getIcon(filename) {
   const ext = filename.split('.').pop().toLowerCase();
-  
+
   if (['mp4', 'mkv', 'avi', 'mov'].includes(ext)) {
     return `<svg class="file-icon" viewBox="0 0 24 24"><path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14v2a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h8a2 2 0 012 2v2z"/></svg>`;
   } else if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
@@ -58,9 +58,9 @@ function getIcon(filename) {
 
 function generateHTML(objects) {
   let listRows = '';
-  
+
   if (!objects || objects.length === 0) {
-    listRows = \`
+    listRows = `
       <tr>
         <td colspan="3">
           <div class="empty-state">
@@ -71,7 +71,7 @@ function generateHTML(objects) {
           </div>
         </td>
       </tr>
-    \`;
+    `;
   } else {
     for (const obj of objects) {
       const date = new Date(obj.uploaded);
@@ -81,23 +81,23 @@ function generateHTML(objects) {
       });
       const icon = getIcon(obj.key);
       const size = formatBytes(obj.size);
-      
-      listRows += \`
+
+      listRows += `
         <tr>
           <td>
-            <a href="/\${encodeURIComponent(obj.key)}" class="file-link" download="\${obj.key}">
-              \${icon}
-              <span class="file-name">\${obj.key}</span>
+            <a href="/${encodeURIComponent(obj.key)}" class="file-link" download="${obj.key}">
+              ${icon}
+              <span class="file-name">${obj.key}</span>
             </a>
           </td>
-          <td class="size hide-mobile">\${size}</td>
-          <td class="date hide-mobile">\${formattedDate}</td>
+          <td class="size hide-mobile">${size}</td>
+          <td class="date hide-mobile">${formattedDate}</td>
         </tr>
-      \`;
+      `;
     }
   }
 
-  return \`<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -327,11 +327,11 @@ function generateHTML(objects) {
           </tr>
         </thead>
         <tbody>
-          \${listRows}
+          ${listRows}
         </tbody>
       </table>
     </div>
   </div>
 </body>
-</html>\`;
+</html>`;
 }
