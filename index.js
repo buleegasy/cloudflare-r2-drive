@@ -1302,18 +1302,37 @@ function generateHTML(list, currentPath = '', isTrash = false) {
                if (res.ok) window.location.reload(); else await customAlert('Delete failed: ' + await res.text());
             }
         } else {
-            let actionText = isFolder 
-              ? \`Options for \${ key }\\nType 'download' to zip, 'delete' to move to trash:\` 
-              : \`Options for \${ key }\\nType 'preview' to view (if supported), 'rename' to rename, 'delete' to move to trash:\`;
-            let defaultAction = isFolder ? 'download' : 'preview';
+            const filename = key.split('/').pop();
+            const ext = filename.split('.').pop().toLowerCase();
+            const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'mp4', 'webm', 'ogg', 'mp3', 'wav', 'flac', 'pdf', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv'];
+            const isPreviewable = previewableExts.includes(ext);
+
+            let actionText = '';
+            let defaultAction = '';
+            if (isFolder) {
+              actionText = \`Options for \${ key }\\nType 'download' to zip, 'delete' to move to trash:\`;
+              defaultAction = 'download';
+            } else if (isPreviewable) {
+              actionText = \`Options for \${ key }\\nType 'preview' to view, 'rename' to rename, 'delete' to move to trash:\`;
+              defaultAction = 'preview';
+            } else {
+              actionText = \`Options for \${ key }\\nType 'download' to download, 'rename' to rename, 'delete' to move to trash:\`;
+              defaultAction = 'download';
+            }
+            
             const action = await customPrompt('Options', actionText, defaultAction);
             
             if (action === 'download' && isFolder) {
                 downloadFolder(key);
+            } else if (action === 'download' && !isFolder) {
+                const a = document.createElement('a');
+                a.href = '/' + encodeURIComponent(key);
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
             } else if (action === 'preview' && !isFolder) {
-                const filename = key.split('/').pop();
-                const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'mp4', 'webm', 'ogg', 'mp3', 'wav', 'flac', 'pdf', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv'];
-                if (previewableExts.includes(filename.split('.').pop().toLowerCase())) {
+                if (isPreviewable) {
                     showPreview('/' + encodeURIComponent(key) + '?preview=true', filename);
                 } else {
                     await customAlert('Preview not supported for this file type. Please download to view.');
