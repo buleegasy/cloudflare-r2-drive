@@ -185,7 +185,16 @@ export default {
     const headers = new Headers();
     object.writeHttpMetadata(headers);
     headers.set('etag', object.httpEtag);
-    headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(path.split('/').pop())}"`);
+    const isPreview = url.searchParams.get('preview') === 'true';
+    const filename = encodeURIComponent(path.split('/').pop());
+
+    if (isPreview) {
+      headers.set('Content-Disposition', `inline; filename="${filename}"`);
+      // We explicitly don't set a forced content-type here, we can rely on R2's stored metadata
+      // if it has one, or let the browser infer from the data itself.
+    } else {
+      headers.set('Content-Disposition', `attachment; filename="${filename}"`);
+    }
 
     return new Response(object.body, { headers });
   }
@@ -303,12 +312,19 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     const icon = getIcon(obj.key);
     const size = formatBytes(obj.size);
 
+    const ext = filename.split('.').pop().toLowerCase();
+    const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'mp4', 'webm', 'ogg', 'mp3', 'wav', 'flac', 'pdf', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv'];
+    const isPreviewable = previewableExts.includes(ext);
+    const anchorAttrs = isPreviewable
+      ? `data-previewable="true" data-url="/${encodeURIComponent(obj.key)}?preview=true"`
+      : `download="${filename}"`;
+
     listRows += `
       <tr class="file-row" data-key="${obj.key}">
         <td>
           <div class="row-content">
             <input type="checkbox" class="file-checkbox" value="${obj.key}" />
-            <a href="/${encodeURIComponent(obj.key)}" class="file-link" download="${filename}">
+            <a href="/${encodeURIComponent(obj.key)}" class="file-link" ${anchorAttrs}>
               ${icon}
               <span class="file-name">${filename}</span>
             </a>
@@ -825,6 +841,43 @@ function generateHTML(list, currentPath = '', isTrash = false) {
       color: var(--text-main);
       border-color: rgba(255,255,255,0.2);
     }
+    
+    /* Preview Modal */
+    .preview-modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px);
+      z-index: 10000; display: flex; flex-direction: column;
+      opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
+    }
+    .preview-modal-overlay.active { opacity: 1; pointer-events: auto; }
+    
+    .preview-header {
+      padding: 1rem 1.5rem;
+      display: flex; justify-content: space-between; align-items: center;
+      background: rgba(0,0,0,0.4); border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .preview-title { font-weight: 600; font-size: 1.1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
+    
+    .preview-actions { display: flex; gap: 0.75rem; align-items: center; }
+    .preview-content-area {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      padding: 2rem; overflow: hidden;
+    }
+    
+    .preview-content-area img, .preview-content-area video, .preview-content-area iframe {
+      max-width: 100%; max-height: 100%; border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .preview-content-area iframe {
+      width: 100%; height: 100%; background: white;
+    }
+    .preview-content-area .text-preview {
+      width: 100%; height: 100%; max-width: 1200px;
+      background: rgba(30, 41, 59, 0.9); border-radius: 12px;
+      padding: 1.5rem; overflow: auto; color: #e2e8f0; font-family: monospace; white-space: pre-wrap;
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
   </style>
 </head>
 <body>
@@ -913,6 +966,24 @@ function generateHTML(list, currentPath = '', isTrash = false) {
         <button id="custom-modal-cancel" class="upload-btn" style="background: rgba(255,255,255,0.1)">Cancel</button>
         <button id="custom-modal-confirm" class="upload-btn" style="background: var(--accent); color: white; border-color: var(--accent);">OK</button>
       </div>
+    </div>
+  </div>
+
+  <div id="preview-modal-overlay" class="preview-modal-overlay">
+    <div class="preview-header">
+      <div class="preview-title" id="preview-title">Filename.ext</div>
+      <div class="preview-actions">
+        <a id="preview-download-btn" class="upload-btn" style="padding: 0.4rem 1rem; font-size: 0.85rem;" download>
+          <svg style="width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          Download
+        </a>
+        <button id="preview-close-btn" class="icon-btn" style="background: rgba(255,255,255,0.1); width: 32px; height: 32px;">
+          <svg style="width:16px;height:16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="preview-content-area" id="preview-content-area">
+      <!-- Dynamic content injected here -->
     </div>
   </div>
 
@@ -1231,12 +1302,22 @@ function generateHTML(list, currentPath = '', isTrash = false) {
                if (res.ok) window.location.reload(); else await customAlert('Delete failed: ' + await res.text());
             }
         } else {
-            let actionText = isFolder ? \`Options for \${ key }\\nType 'download' to zip, 'delete' to move to trash:\` : \`Options for \${ key }\\nType 'rename' to rename, 'delete' to move to trash:\`;
-            let defaultAction = isFolder ? 'download' : 'rename';
+            let actionText = isFolder 
+              ? \`Options for \${ key }\\nType 'download' to zip, 'delete' to move to trash:\` 
+              : \`Options for \${ key }\\nType 'preview' to view (if supported), 'rename' to rename, 'delete' to move to trash:\`;
+            let defaultAction = isFolder ? 'download' : 'preview';
             const action = await customPrompt('Options', actionText, defaultAction);
             
             if (action === 'download' && isFolder) {
                 downloadFolder(key);
+            } else if (action === 'preview' && !isFolder) {
+                const filename = key.split('/').pop();
+                const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'mp4', 'webm', 'ogg', 'mp3', 'wav', 'flac', 'pdf', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv'];
+                if (previewableExts.includes(filename.split('.').pop().toLowerCase())) {
+                    showPreview('/' + encodeURIComponent(key) + '?preview=true', filename);
+                } else {
+                    await customAlert('Preview not supported for this file type. Please download to view.');
+                }
             } else if (action === 'delete') {
                 const res = await fetch('/api/trash-batch', {
                   method: 'POST',
@@ -1263,6 +1344,74 @@ function generateHTML(list, currentPath = '', isTrash = false) {
                 await customAlert('Folder rename is not supported.');
             }
         }
+      }
+    });
+
+    // Preview Logic
+    const previewModalOverlay = document.getElementById('preview-modal-overlay');
+    const previewTitle = document.getElementById('preview-title');
+    const previewContentArea = document.getElementById('preview-content-area');
+    const previewDownloadBtn = document.getElementById('preview-download-btn');
+    const previewCloseBtn = document.getElementById('preview-close-btn');
+
+    function closePreview() {
+      previewModalOverlay.classList.remove('active');
+      setTimeout(() => {
+        previewContentArea.innerHTML = ''; // clear content to stop audio/video
+        previewDownloadBtn.href = '';
+      }, 300);
+    }
+
+    previewCloseBtn.addEventListener('click', closePreview);
+    previewModalOverlay.addEventListener('click', (e) => {
+      if (e.target === previewModalOverlay) closePreview();
+    });
+
+    function showPreview(url, filename) {
+      previewTitle.textContent = filename;
+      
+      const downloadUrl = url.replace('?preview=true', '');
+      previewDownloadBtn.href = downloadUrl;
+      previewDownloadBtn.download = filename;
+
+      const ext = filename.split('.').pop().toLowerCase();
+      let contentHtml = '';
+
+      if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
+        contentHtml = \`<img src="\${url}" alt="\${filename}" />\`;
+      } else if (['mp4', 'webm', 'ogg'].includes(ext)) {
+        contentHtml = \`<video src="\${url}" controls autoplay></video>\`;
+      } else if (['mp3', 'wav', 'flac'].includes(ext)) {
+        contentHtml = \`<audio src="\${url}" controls autoplay></audio>\`;
+      } else if (ext === 'pdf') {
+        contentHtml = \`<iframe src="\${url}"></iframe>\`;
+      } else if (['txt', 'md', 'js', 'json', 'html', 'css', 'csv'].includes(ext)) {
+        // Fetch text content
+        contentHtml = \`<div class="text-preview">Loading text...</div>\`;
+        fetch(url)
+          .then(res => res.text())
+          .then(text => {
+            const container = previewContentArea.querySelector('.text-preview');
+            if (container) container.textContent = text;
+          })
+          .catch(err => {
+            const container = previewContentArea.querySelector('.text-preview');
+            if (container) container.textContent = 'Error loading text: ' + err.message;
+          });
+      }
+
+      previewContentArea.innerHTML = contentHtml;
+      previewModalOverlay.classList.add('active');
+    }
+
+    // Intercept clicks on file links
+    document.addEventListener('click', (e) => {
+      const fileLink = e.target.closest('.file-link');
+      if (fileLink && fileLink.getAttribute('data-previewable') === 'true') {
+        e.preventDefault();
+        const url = fileLink.getAttribute('data-url');
+        const filename = fileLink.querySelector('.file-name').textContent;
+        showPreview(url, filename);
       }
     });
 
