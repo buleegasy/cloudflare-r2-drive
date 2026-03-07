@@ -313,7 +313,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     const size = formatBytes(obj.size);
 
     const ext = filename.split('.').pop().toLowerCase();
-    const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'mp4', 'webm', 'ogg', 'mp3', 'wav', 'flac', 'pdf', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv'];
+    const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'mp4', 'webm', 'ogg', 'mov', 'm4v', 'mp3', 'wav', 'flac', 'm4a', 'aac', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'rb', 'php', 'sh', 'bash', 'zsh', 'bat', 'ps1', 'yaml', 'yml', 'xml', 'ini', 'toml', 'env', 'log', 'ts', 'jsx', 'tsx', 'vue', 'sql'];
     const isPreviewable = previewableExts.includes(ext);
     const anchorAttrs = isPreviewable
       ? `data-previewable="true" data-url="/${encodeURIComponent(obj.key)}?preview=true"`
@@ -1304,7 +1304,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
         } else {
             const filename = key.split('/').pop();
             const ext = filename.split('.').pop().toLowerCase();
-            const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'mp4', 'webm', 'ogg', 'mp3', 'wav', 'flac', 'pdf', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv'];
+            const previewableExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'mp4', 'webm', 'ogg', 'mov', 'm4v', 'mp3', 'wav', 'flac', 'm4a', 'aac', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'js', 'json', 'html', 'css', 'csv', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'rb', 'php', 'sh', 'bash', 'zsh', 'bat', 'ps1', 'yaml', 'yml', 'xml', 'ini', 'toml', 'env', 'log', 'ts', 'jsx', 'tsx', 'vue', 'sql'];
             const isPreviewable = previewableExts.includes(ext);
 
             let actionText = '';
@@ -1396,15 +1396,18 @@ function generateHTML(list, currentPath = '', isTrash = false) {
       const ext = filename.split('.').pop().toLowerCase();
       let contentHtml = '';
 
-      if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
+      if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'].includes(ext)) {
         contentHtml = \`<img src="\${url}" alt="\${filename}" />\`;
-      } else if (['mp4', 'webm', 'ogg'].includes(ext)) {
+      } else if (['mp4', 'webm', 'ogg', 'mov', 'm4v'].includes(ext)) {
         contentHtml = \`<video src="\${url}" controls autoplay></video>\`;
-      } else if (['mp3', 'wav', 'flac'].includes(ext)) {
+      } else if (['mp3', 'wav', 'flac', 'm4a', 'aac'].includes(ext)) {
         contentHtml = \`<audio src="\${url}" controls autoplay></audio>\`;
       } else if (ext === 'pdf') {
         contentHtml = \`<iframe src="\${url}"></iframe>\`;
-      } else if (['txt', 'md', 'js', 'json', 'html', 'css', 'csv'].includes(ext)) {
+      } else if (['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'].includes(ext)) {
+        const absoluteUrl = window.location.origin + downloadUrl;
+        contentHtml = \`<iframe src="https://view.officeapps.live.com/op/embed.aspx?src=\${encodeURIComponent(absoluteUrl)}"></iframe>\`;
+      } else if (['txt', 'md', 'js', 'json', 'html', 'css', 'csv', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'rb', 'php', 'sh', 'bash', 'zsh', 'bat', 'ps1', 'yaml', 'yml', 'xml', 'ini', 'toml', 'env', 'log', 'ts', 'jsx', 'tsx', 'vue', 'sql'].includes(ext)) {
         // Fetch text content
         contentHtml = \`<div class="text-preview">Loading text...</div>\`;
         fetch(url)
