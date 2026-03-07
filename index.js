@@ -3,22 +3,15 @@ export default {
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname.slice(1));
 
-    if (path === '' || path === '/') {
-      const list = await env.BUCKET.list();
-      return new Response(generateHTML(list.objects), {
-        headers: {
-          'Content-Type': 'text/html;charset=UTF-8'
-        }
-      });
-    }
-
-    if (request.method === 'POST' && path === 'upload') {
+    if (request.method === 'POST' && path === 'api/upload') {
       const filename = request.headers.get('X-File-Name');
+      const currentPath = request.headers.get('X-Current-Path') || '';
       if (!filename) {
         return new Response('Filename missing', { status: 400 });
       }
 
       const decodedFilename = decodeURIComponent(filename);
+      const fullKey = currentPath + decodedFilename;
 
       // 10GB Limit Check
       const list = await env.BUCKET.list();
@@ -34,16 +27,158 @@ export default {
         return new Response('Storage limit exceeded (10GB max)', { status: 413 });
       }
 
-      await env.BUCKET.put(decodedFilename, request.body);
+      await env.BUCKET.put(fullKey, request.body);
       return new Response('Upload successful', { status: 200 });
+    }
+
+    if (request.method === 'POST' && path === 'api/trash-batch') {
+      try {
+        const { keys } = await request.json();
+        if (!Array.isArray(keys)) return new Response('Invalid keys', { status: 400 });
+        for (const key of keys) {
+          if (key.endsWith('/')) {
+            let listed;
+            do {
+              listed = await env.BUCKET.list({ prefix: key });
+              for (const object of listed.objects) {
+                const newKey = '.trash/' + object.key;
+                const obj = await env.BUCKET.get(object.key);
+                if (obj) {
+                  await env.BUCKET.put(newKey, obj.body, { httpMetadata: obj.httpMetadata });
+                  await env.BUCKET.delete(object.key);
+                }
+              }
+            } while (listed.truncated);
+          } else {
+            const newKey = '.trash/' + key;
+            const obj = await env.BUCKET.get(key);
+            if (obj) {
+              await env.BUCKET.put(newKey, obj.body, { httpMetadata: obj.httpMetadata });
+              await env.BUCKET.delete(key);
+            }
+          }
+        }
+        return new Response('Trashed', { status: 200 });
+      } catch (e) {
+        return new Response('Error', { status: 500 });
+      }
+    }
+
+    if (request.method === 'POST' && path === 'api/restore-batch') {
+      try {
+        const { keys } = await request.json();
+        if (!Array.isArray(keys)) return new Response('Invalid keys', { status: 400 });
+        for (const key of keys) {
+          if (key.endsWith('/')) {
+            let listed;
+            do {
+              listed = await env.BUCKET.list({ prefix: key });
+              for (const object of listed.objects) {
+                if (object.key.startsWith('.trash/')) {
+                  const newKey = object.key.slice('.trash/'.length);
+                  const obj = await env.BUCKET.get(object.key);
+                  if (obj) {
+                    await env.BUCKET.put(newKey, obj.body, { httpMetadata: obj.httpMetadata });
+                    await env.BUCKET.delete(object.key);
+                  }
+                }
+              }
+            } while (listed.truncated);
+          } else {
+            if (key.startsWith('.trash/')) {
+              const newKey = key.slice('.trash/'.length);
+              const obj = await env.BUCKET.get(key);
+              if (obj) {
+                await env.BUCKET.put(newKey, obj.body, { httpMetadata: obj.httpMetadata });
+                await env.BUCKET.delete(key);
+              }
+            }
+          }
+        }
+        return new Response('Restored', { status: 200 });
+      } catch (e) {
+        return new Response('Error', { status: 500 });
+      }
+    }
+
+    if (request.method === 'POST' && path === 'api/delete-batch') {
+      try {
+        const { keys } = await request.json();
+        if (!Array.isArray(keys)) return new Response('Invalid keys', { status: 400 });
+        for (const key of keys) {
+          if (key.endsWith('/')) {
+            let listed;
+            do {
+              listed = await env.BUCKET.list({ prefix: key });
+              for (const object of listed.objects) {
+                await env.BUCKET.delete(object.key);
+              }
+            } while (listed.truncated);
+          } else {
+            await env.BUCKET.delete(key);
+          }
+        }
+        return new Response('Deleted', { status: 200 });
+      } catch (e) {
+        return new Response('Error', { status: 500 });
+      }
+    }
+
+    if (request.method === 'POST' && path === 'api/rename') {
+      try {
+        const { oldKey, newKey } = await request.json();
+        const obj = await env.BUCKET.get(oldKey);
+        if (!obj) return new Response('Not Found', { status: 404 });
+        await env.BUCKET.put(newKey, obj.body, { httpMetadata: obj.httpMetadata });
+        await env.BUCKET.delete(oldKey);
+        return new Response('Renamed', { status: 200 });
+      } catch (e) {
+        return new Response('Error', { status: 500 });
+      }
+    }
+
+
+
+    if (request.method === 'GET' && path === 'api/list-folder') {
+      const prefix = new URL(request.url).searchParams.get('prefix');
+      if (!prefix) return new Response('Prefix missing', { status: 400 });
+      let allObjects = [];
+      let listed;
+      do {
+        listed = await env.BUCKET.list({ prefix });
+        allObjects.push(...listed.objects.map(o => o.key));
+      } while (listed.truncated);
+      return new Response(JSON.stringify({ keys: allObjects }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
     if (request.method !== 'GET') {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
+    // If it's a directory or root
+    if (path === '' || path.endsWith('/')) {
+      const options = { delimiter: '/' };
+      if (path !== '') {
+        options.prefix = path;
+      }
+      const list = await env.BUCKET.list(options);
+      const isTrash = path.startsWith('.trash/');
+      return new Response(generateHTML(list, path, isTrash), {
+        headers: {
+          'Content-Type': 'text/html;charset=UTF-8'
+        }
+      });
+    }
+
     const object = await env.BUCKET.get(path);
     if (!object) {
+      // Maybe they forgot the trailing slash for a directory? Try to redirect.
+      const testList = await env.BUCKET.list({ prefix: path + '/', limit: 1 });
+      if (testList.objects.length > 0 || testList.delimitedPrefixes.length > 0) {
+        return Response.redirect(url.toString() + '/', 301);
+      }
       return new Response('Not Found', { status: 404 });
     }
 
@@ -82,45 +217,129 @@ function getIcon(filename) {
   return `<svg class="file-icon" viewBox="0 0 24 24"><path d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>`;
 }
 
-function generateHTML(objects) {
-  let listRows = '';
+function getFolderIcon() {
+  return `<svg class="file-icon folder-icon" viewBox="0 0 24 24"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>`;
+}
 
-  if (!objects || objects.length === 0) {
-    listRows = `
-      <tr>
-        <td colspan="3">
-          <div class="empty-state">
-            <svg style="width: 48px; height: 48px; margin-bottom: 1rem; opacity: 0.5; stroke: currentColor; fill: none; stroke-width: 2;" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
-            </svg>
-            <p>Your drive is completely empty</p>
+function generateBreadcrumbs(currentPath) {
+  if (!currentPath) return '<div class="breadcrumbs" data-path=""><span>Home</span></div>';
+  const parts = currentPath.split('/').filter(Boolean);
+  let breadcrumbStr = '<a href="/" class="breadcrumb-link">Home</a>';
+  let pathAccumulator = '';
+  for (let i = 0; i < parts.length; i++) {
+    pathAccumulator += parts[i] + '/';
+    breadcrumbStr += ` <span class="separator">/</span> `;
+    if (i === parts.length - 1) {
+      breadcrumbStr += `<span>${parts[i]}</span>`;
+    } else {
+      breadcrumbStr += `<a href="/${encodeURIComponent(pathAccumulator)}" class="breadcrumb-link">${parts[i]}</a>`;
+    }
+  }
+  return `<div class="breadcrumbs" data-path="${currentPath}">${breadcrumbStr}</div>`;
+}
+
+function generateHTML(list, currentPath = '', isTrash = false) {
+  let listRows = '';
+  const objects = list.objects || [];
+  const prefixes = list.delimitedPrefixes || [];
+
+  if (currentPath !== '') {
+    const parentPath = currentPath.split('/').filter(Boolean).slice(0, -1).join('/');
+    const parentHref = parentPath ? '/' + encodeURIComponent(parentPath + '/') : '/';
+    listRows += `
+      <tr class="folder-row">
+        <td>
+          <div class="row-content">
+            <input type="checkbox" disabled style="opacity:0;" />
+            <a href="${parentHref}" class="file-link">
+              <svg class="file-icon" viewBox="0 0 24 24"><path d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+              <span class="file-name">..</span>
+            </a>
+          </div>
+        </td>
+        <td class="size hide-mobile">-</td>
+        <td class="date hide-mobile">-</td>
+        <td></td>
+      </tr>
+    `;
+  }
+
+  for (const prefix of prefixes) {
+    const folderName = prefix.split('/').filter(Boolean).pop();
+    listRows += `
+      <tr class="folder-row" data-key="${prefix}">
+        <td>
+          <div class="row-content">
+            <input type="checkbox" class="file-checkbox folder-checkbox" value="${prefix}" />
+            <a href="/${encodeURIComponent(prefix)}" class="file-link">
+              ${getFolderIcon()}
+              <span class="file-name">${folderName}</span>
+            </a>
+          </div>
+        </td>
+        <td class="size hide-mobile">-</td>
+        <td class="date hide-mobile">-</td>
+        <td>
+          <div class="action-menu">
+            <button class="icon-btn context-menu-btn" data-key="${prefix}" data-is-folder="true" data-is-trash="${isTrash}">
+              <svg viewBox="0 0 24 24" class="menu-icon"><path d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"/></svg>
+            </button>
           </div>
         </td>
       </tr>
     `;
-  } else {
-    for (const obj of objects) {
-      const date = new Date(obj.uploaded);
-      const formattedDate = date.toLocaleDateString('en-US', {
-        year: 'numeric', month: 'short', day: 'numeric',
-        hour: '2-digit', minute: '2-digit'
-      });
-      const icon = getIcon(obj.key);
-      const size = formatBytes(obj.size);
+  }
 
-      listRows += `
-        <tr>
-          <td>
-            <a href="/${encodeURIComponent(obj.key)}" class="file-link" download="${obj.key}">
+  for (const obj of objects) {
+    // R2 might list the directory placeholder object itself, skip it
+    if (obj.key === currentPath) continue;
+
+    const date = new Date(obj.uploaded);
+    const formattedDate = date.toLocaleDateString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+    const filename = obj.key.split('/').pop();
+    const icon = getIcon(obj.key);
+    const size = formatBytes(obj.size);
+
+    listRows += `
+      <tr class="file-row" data-key="${obj.key}">
+        <td>
+          <div class="row-content">
+            <input type="checkbox" class="file-checkbox" value="${obj.key}" />
+            <a href="/${encodeURIComponent(obj.key)}" class="file-link" download="${filename}">
               ${icon}
-              <span class="file-name">${obj.key}</span>
+              <span class="file-name">${filename}</span>
             </a>
-          </td>
-          <td class="size hide-mobile">${size}</td>
-          <td class="date hide-mobile">${formattedDate}</td>
-        </tr>
-      `;
-    }
+          </div>
+        </td>
+        <td class="size hide-mobile">${size}</td>
+        <td class="date hide-mobile">${formattedDate}</td>
+        <td>
+          <div class="action-menu">
+            <button class="icon-btn context-menu-btn" data-key="${obj.key}" data-is-folder="false" data-is-trash="${isTrash}">
+              <svg viewBox="0 0 24 24" class="menu-icon"><path d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"/></svg>
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }
+
+  if (listRows === '') {
+    listRows = `
+      <tr>
+        <td colspan="4">
+          <div class="empty-state">
+            <svg style="width: 48px; height: 48px; margin-bottom: 1rem; opacity: 0.5; stroke: currentColor; fill: none; stroke-width: 2;" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+            </svg>
+            <p>This folder is completely empty</p>
+          </div>
+        </td>
+      </tr>
+    `;
   }
 
   return `<!DOCTYPE html>
@@ -130,48 +349,64 @@ function generateHTML(objects) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cloud Drive</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
   <style>
     :root {
-      --bg-color: #0f172a;
-      --card-bg: rgba(30, 41, 59, 0.4);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --accent: #38bdf8;
-      --hover-bg: rgba(255, 255, 255, 0.05);
+      --text-main: #ffffff;
+      --text-muted: rgba(255, 255, 255, 0.6);
+      --accent: #0a84ff;
+      --danger: #ff453a;
+      --glass-bg: rgba(255, 255, 255, 0.08); /* slight lightness */
+      --glass-border: rgba(255, 255, 255, 0.15);
+      --glass-hover: rgba(255, 255, 255, 0.12);
     }
     
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     
     body {
-      font-family: 'Inter', -apple-system, sans-serif;
-      background-color: var(--bg-color);
-      background-image: 
-        radial-gradient(circle at 15% 50%, rgba(56, 189, 248, 0.15), transparent 25%),
-        radial-gradient(circle at 85% 30%, rgba(129, 140, 248, 0.15), transparent 25%);
-      background-attachment: fixed;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+      background-color: #000;
       color: var(--text-main);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 3rem 1.5rem;
+      padding: 4rem 1.5rem;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Vibrant abstract mesh gradient background */
+    .mesh-bg {
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      z-index: -1;
+      background: 
+        radial-gradient(circle at 15% 10%, rgba(20, 184, 166, 0.4) 0%, transparent 40%),
+        radial-gradient(circle at 85% 20%, rgba(99, 102, 241, 0.35) 0%, transparent 40%),
+        radial-gradient(circle at 50% 80%, rgba(56, 189, 248, 0.35) 0%, transparent 50%),
+        radial-gradient(circle at 80% 90%, rgba(139, 92, 246, 0.3) 0%, transparent 40%);
+      filter: blur(60px);
+      opacity: 0.8;
+      animation: mesh-shift 15s ease-in-out infinite alternate;
+    }
+
+    @keyframes mesh-shift {
+      0% { transform: scale(1) translate(0, 0); }
+      33% { transform: scale(1.1) translate(2%, -2%); }
+      66% { transform: scale(0.95) translate(-2%, 2%); }
+      100% { transform: scale(1) translate(0, 0); }
     }
     
     .container {
       width: 100%;
-      max-width: 900px;
+      max-width: 960px;
       animation: fadeIn 0.8s ease-out;
       position: relative;
       z-index: 10;
     }
     
     @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(10px); }
+      from { opacity: 0; transform: translateY(20px); }
       to { opacity: 1; transform: translateY(0); }
     }
     
@@ -181,43 +416,159 @@ function generateHTML(objects) {
     }
     
     .header h1 {
-      font-size: 2.5rem;
-      font-weight: 700;
-      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      font-size: clamp(4rem, 10vw, 7rem);
+      font-weight: 500;
+      letter-spacing: -0.02em;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.6) 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
-      margin-bottom: 0.75rem;
-      letter-spacing: -0.02em;
+      margin-bottom: 0.5rem;
+      text-shadow: none;
     }
     
-    .header p {
+    /* Liquid Glass Class */
+    .liquid-glass {
+      background: var(--glass-bg);
+      backdrop-filter: blur(30px) saturate(200%);
+      -webkit-backdrop-filter: blur(30px) saturate(200%);
+      border: 1px solid var(--glass-border);
+      box-shadow: 
+        0 24px 48px rgba(0, 0, 0, 0.2),
+        inset 0 1px 0 rgba(255, 255, 255, 0.2);
+      border-radius: 24px;
+    }
+
+    .action-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+      width: 100%;
+      padding: 1rem 1.5rem;
+    }
+    
+    .action-buttons {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    button {
+      font-family: inherit;
+    }
+
+    .upload-btn, .batch-delete-btn {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text-main);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      padding: 0.6rem 1.25rem;
+      border-radius: 999px; /* full pill Apple style */
+      font-weight: 500;
+      font-size: 0.95rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: all 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+      backdrop-filter: blur(20px) saturate(150%);
+      -webkit-backdrop-filter: blur(20px) saturate(150%);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    
+    .upload-btn:hover, .batch-delete-btn:hover {
+      background: rgba(255, 255, 255, 0.2);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+    }
+    .upload-btn:active, .batch-delete-btn:active {
+      transform: translateY(0);
+    }
+
+    .batch-delete-btn {
+      color: var(--danger);
+      background: rgba(255, 69, 58, 0.1);
+      border-color: rgba(255, 69, 58, 0.3);
+      display: none;
+    }
+    .batch-delete-btn.visible {
+      display: inline-flex;
+    }
+    
+    .breadcrumbs {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 1rem;
+      font-weight: 500;
       color: var(--text-muted);
-      font-size: 1.1rem;
-      font-weight: 400;
+    }
+    .breadcrumb-link {
+      color: var(--text-main);
+      text-decoration: none;
+      transition: color 0.2s, opacity 0.2s;
+    }
+    .breadcrumb-link:hover {
+      opacity: 0.7;
+    }
+    .separator {
+      color: rgba(255,255,255,0.3);
+      font-weight: 300;
+    }
+    
+    .row-content {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    
+    /* Apple style checkboxes */
+    input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 1.25rem;
+      height: 1.25rem;
+      flex-shrink: 0;
+      border: 1.5px solid rgba(255,255,255,0.4);
+      border-radius: 6px;
+      cursor: pointer;
+      outline: none;
+      transition: all 0.2s ease;
+      position: relative;
+      background: rgba(0,0,0,0.1);
+    }
+    input[type="checkbox"]:checked {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    input[type="checkbox"]:checked::after {
+      content: '';
+      position: absolute;
+      top: 2px; left: 6px;
+      width: 4px; height: 10px;
+      border: solid white;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
     }
     
     .file-list-container {
-      background: var(--card-bg);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border: 1px solid var(--card-border);
-      border-radius: 20px;
       overflow: hidden;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-      transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
-      position: relative;
+      transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.3s ease;
     }
 
     .file-list-container.dragover {
+      transform: scale(1.02);
       border-color: var(--accent);
-      background: rgba(56, 189, 248, 0.1);
+      box-shadow: 0 0 0 4px rgba(10, 132, 255, 0.3);
     }
     
     .upload-overlay {
       position: absolute;
       top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(15, 23, 42, 0.8);
-      backdrop-filter: blur(8px);
+      background: rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -226,6 +577,7 @@ function generateHTML(objects) {
       pointer-events: none;
       transition: opacity 0.3s ease;
       z-index: 50;
+      border-radius: 24px;
     }
     
     .file-list-container.dragover .upload-overlay {
@@ -234,89 +586,32 @@ function generateHTML(objects) {
 
     .upload-overlay p {
       margin-top: 1rem;
-      font-size: 1.25rem;
+      font-size: 1.5rem;
       font-weight: 600;
-      color: var(--accent);
-    }
-
-    .action-bar {
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 1rem;
-    }
-
-    .upload-btn {
-      background: rgba(56, 189, 248, 0.1);
-      color: var(--accent);
-      border: 1px solid rgba(56, 189, 248, 0.3);
-      padding: 0.5rem 1.25rem;
-      border-radius: 999px;
-      font-family: inherit;
-      font-weight: 500;
-      font-size: 0.9rem;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      transition: all 0.2s ease;
-    }
-
-    .upload-btn:hover {
-      background: rgba(56, 189, 248, 0.2);
-      transform: translateY(-1px);
-    }
-
-    .upload-btn:active {
-      transform: translateY(0);
-    }
-
-    #upload-input {
-      display: none;
-    }
-    
-    .progress-bar-container {
-      position: absolute;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      height: 4px;
-      background: rgba(255,255,255,0.1);
-      display: none;
-    }
-    
-    .progress-bar {
-      height: 100%;
-      width: 0%;
-      background: var(--accent);
-      transition: width 0.3s ease;
-    }
-    .file-list-container:hover {
-      box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.6);
+      color: var(--text-main);
+      text-shadow: 0 2px 10px rgba(0,0,0,0.5);
     }
     
     .file-list {
       width: 100%;
-      border-collapse: separate;
-      border-spacing: 0;
+      border-collapse: collapse;
       text-align: left;
     }
     
     .file-list th, .file-list td {
-      padding: 1.25rem 1.5rem;
+      padding: 1.1rem 1.5rem;
     }
     
     .file-list th {
       color: var(--text-muted);
-      font-weight: 600;
-      font-size: 0.75rem;
-      border-bottom: 1px solid var(--card-border);
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      background: rgba(15, 23, 42, 0.4);
+      font-weight: 500;
+      font-size: 0.85rem;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      letter-spacing: 0.02em;
     }
     
     .file-list tr td {
-      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
       transition: background-color 0.2s ease;
     }
     
@@ -325,7 +620,7 @@ function generateHTML(objects) {
     }
     
     .file-list tbody tr:hover td {
-      background-color: var(--hover-bg);
+      background-color: var(--glass-hover);
     }
     
     .file-link {
@@ -335,16 +630,12 @@ function generateHTML(objects) {
       color: var(--text-main);
       text-decoration: none;
       font-weight: 500;
-      font-size: 0.95rem;
-      transition: color 0.2s ease, transform 0.2s ease;
+      font-size: 1rem;
+      transition: opacity 0.2s ease;
     }
     
     .file-link:hover {
-      color: var(--accent);
-    }
-    
-    .file-link:active {
-      transform: scale(0.98);
+      opacity: 0.8;
     }
     
     .file-name {
@@ -353,49 +644,116 @@ function generateHTML(objects) {
     }
     
     .file-icon {
-      width: 24px;
-      height: 24px;
+      width: 28px;
+      height: 28px;
       flex-shrink: 0;
       fill: none;
-      stroke: currentColor;
-      stroke-width: 2;
+      stroke: var(--accent); /* Apple style uses tint color for folder/app icons */
+      stroke-width: 1.5;
       stroke-linecap: round;
       stroke-linejoin: round;
-      color: var(--text-muted);
-      transition: color 0.2s ease;
     }
-
-    tbody tr:hover .file-icon {
-      color: var(--accent);
+    
+    .folder-icon {
+      fill: rgba(10, 132, 255, 0.2);
     }
     
     .size, .date {
       color: var(--text-muted);
-      font-size: 0.875rem;
+      font-size: 0.9rem;
       white-space: nowrap;
     }
     
     .empty-state {
       text-align: center;
-      padding: 4rem 2rem;
+      padding: 5rem 2rem;
       color: var(--text-muted);
     }
     
-    @keyframes pulse-glow {
-      0%, 100% { opacity: 0.6; transform: scale(1); }
-      50% { opacity: 1; transform: scale(1.1); }
+    .action-menu {
+      display: flex;
+      justify-content: flex-end;
     }
     
-    .glow-dot {
-      position: absolute;
-      width: 300px;
-      height: 300px;
-      background: radial-gradient(circle, rgba(56,189,248,0.1) 0%, transparent 70%);
-      top: -150px;
-      right: -100px;
-      pointer-events: none;
-      z-index: 1;
-      animation: pulse-glow 8s ease-in-out infinite;
+    .icon-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .icon-btn:hover {
+      background: rgba(255,255,255,0.1);
+      color: var(--text-main);
+    }
+    .menu-icon {
+      width: 20px;
+      height: 20px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+    }
+
+    #upload-input { display: none; }
+    
+    .upload-status-overlay {
+      position: fixed;
+      bottom: 2rem;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: rgba(30, 41, 59, 0.85);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+      border-radius: 999px;
+      padding: 0.75rem 1.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      opacity: 0;
+      transition: opacity 0.4s ease, transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      z-index: 100;
+      min-width: 320px;
+    }
+
+    .upload-status-overlay.active {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .upload-status-text {
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-main);
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    .upload-speed {
+      color: var(--accent);
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 4px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #32d74b, #30b0c7);
+      transition: width 0.1s linear;
+      box-shadow: 0 0 10px rgba(50, 215, 75, 0.5);
     }
     
     @media (max-width: 640px) {
@@ -403,38 +761,114 @@ function generateHTML(objects) {
       .file-list td.hide-mobile {
         display: none;
       }
-      
       .file-list th, .file-list td {
         padding: 1rem;
       }
-      
       .header h1 {
-        font-size: 2rem;
+        font-size: 3.5rem;
       }
-      
       body {
-        padding: 1.5rem 1rem;
+        padding: 2rem 1rem;
       }
+      .liquid-glass {
+        border-radius: 20px;
+      }
+    }
+
+    /* Custom Modal */
+    .custom-modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      z-index: 9999; display: flex; align-items: center; justify-content: center;
+      opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
+    }
+    .custom-modal-overlay.active { opacity: 1; pointer-events: auto; }
+    .custom-modal {
+      width: 90%; max-width: 400px; padding: 2rem; border-radius: 24px;
+      text-align: center; transform: scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    .custom-modal-overlay.active .custom-modal { transform: scale(1); }
+    .custom-modal h3 { margin-bottom: 1rem; font-size: 1.25rem; font-weight: 600; }
+    .custom-modal p { margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.95rem; white-space: pre-wrap; line-height: 1.5; }
+    .custom-modal input {
+      width: 100%; padding: 0.75rem 1rem; border-radius: 12px;
+      background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1);
+      color: white; margin-bottom: 1.5rem; font-family: inherit; font-size: 1rem;
+      outline: none; transition: border-color 0.2s; text-align: center;
+    }
+    .custom-modal input:focus { border-color: var(--accent); }
+    .custom-modal-actions { display: flex; gap: 1rem; justify-content: center; }
+    .custom-modal-actions button { flex: 1; justify-content: center; }
+    
+    .trash-link-corner {
+      position: absolute;
+      top: 1rem;
+      right: 1.5rem;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 0.5rem 1rem;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      z-index: 20;
+    }
+    .trash-link-corner:hover {
+      background: rgba(255,255,255,0.15);
+      color: var(--text-main);
+      border-color: rgba(255,255,255,0.2);
     }
   </style>
 </head>
 <body>
-  <div class="glow-dot"></div>
+  <div class="mesh-bg"></div>
   <div class="container">
+    <a href="/.trash/" class="trash-link-corner">
+      <svg style="width:16px;height:16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>Trash 
+    </a>
     <div class="header">
-      <h1>Cloud Drive</h1>
-      <p>Secure, fast, and beautiful storage</p>
+      <h1>BuleeCloud</h1>
     </div>
     
-    <div class="action-bar">
-      <input type="file" id="upload-input" multiple>
-      <button class="upload-btn" onclick="document.getElementById('upload-input').click()">
-        <svg style="width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4m14-7l-5-5m0 0l-5 5m5-5v12"/></svg>
-        Upload Files
-      </button>
+    <div class="action-bar liquid-glass">
+      <div style="display:flex; align-items:center; gap: 1rem;">
+        ${generateBreadcrumbs(currentPath)}
+      </div>
+      <div class="action-buttons">
+        ${isTrash ? `
+        <button id="batch-restore-btn" class="upload-btn" style="display:none;">
+           Restore Selected
+        </button>
+        <button id="batch-permanent-delete-btn" class="batch-delete-btn">
+          Delete Permanently
+        </button>
+        ` : `
+        <button id="batch-delete-btn" class="batch-delete-btn">
+          <svg style="width:16px;height:16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+          Delete
+        </button>
+        <input type="file" id="upload-input" multiple>
+        <input type="file" id="upload-folder-input" webkitdirectory directory multiple style="display:none;">
+        <button class="upload-btn" onclick="document.getElementById('upload-input').click()">
+          <svg style="width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4m14-7l-5-5m0 0l-5 5m5-5v12"/></svg>
+          Upload Files
+        </button>
+        <button class="upload-btn" onclick="document.getElementById('upload-folder-input').click()">
+          <svg style="width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+          Upload Folder
+        </button>
+        `}
+      </div>
     </div>
 
-    <div class="file-list-container" id="drop-zone">
+    <div class="file-list-container liquid-glass" id="drop-zone">
       <div class="upload-overlay">
          <svg style="width: 64px; height: 64px; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;" viewBox="0 0 24 24"><path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
          <p>Drop files to upload</p>
@@ -442,112 +876,456 @@ function generateHTML(objects) {
       <table class="file-list">
         <thead>
           <tr>
-            <th>Name</th>
+            <th>
+              <div class="row-content" style="gap: 1rem;">
+                <input type="checkbox" id="select-all" />
+                <span>Name</span>
+              </div>
+            </th>
             <th class="hide-mobile">Size</th>
             <th class="hide-mobile">Last Modified</th>
+            <th style="text-align: right;">Action</th>
           </tr>
         </thead>
         <tbody>
           ${listRows}
         </tbody>
       </table>
-      <div class="progress-bar-container" id="progress-container">
-         <div class="progress-bar" id="progress-bar"></div>
+  <!-- Dynamic Island Upload Progress -->
+  <div class="upload-status-overlay" id="upload-status-overlay">
+    <div class="upload-status-text">
+       <span id="upload-filename">Uploading...</span>
+       <span class="upload-speed" id="upload-speed">0 MB/s - 0%</span>
+    </div>
+    <div class="progress-bar-container">
+       <div class="progress-bar" id="progress-bar"></div>
+    </div>
+  </div>
+    </div>
+  </div>
+
+  <div id="custom-modal-overlay" class="custom-modal-overlay">
+    <div class="custom-modal liquid-glass">
+      <h3 id="custom-modal-title">Title</h3>
+      <p id="custom-modal-message">Message</p>
+      <input type="text" id="custom-modal-input" style="display:none;" />
+      <div class="custom-modal-actions">
+        <button id="custom-modal-cancel" class="upload-btn" style="background: rgba(255,255,255,0.1)">Cancel</button>
+        <button id="custom-modal-confirm" class="upload-btn" style="background: var(--accent); color: white; border-color: var(--accent);">OK</button>
       </div>
     </div>
   </div>
 
   <script>
+    const CustomDialog = {
+      show: function({ title, message, type = 'alert', defaultValue = '', confirmText = 'OK', cancelText = 'Cancel', danger = false }) {
+        return new Promise((resolve) => {
+          const overlay = document.getElementById('custom-modal-overlay');
+          const titleEl = document.getElementById('custom-modal-title');
+          const messageEl = document.getElementById('custom-modal-message');
+          const inputEl = document.getElementById('custom-modal-input');
+          const cancelBtn = document.getElementById('custom-modal-cancel');
+          const confirmBtn = document.getElementById('custom-modal-confirm');
+          
+          titleEl.textContent = title;
+          messageEl.textContent = message;
+          
+          if (type === 'prompt') {
+            inputEl.style.display = 'block';
+            inputEl.value = defaultValue;
+            setTimeout(() => inputEl.focus(), 100);
+          } else {
+            inputEl.style.display = 'none';
+          }
+          
+          if (type === 'alert') {
+            cancelBtn.style.display = 'none';
+          } else {
+            cancelBtn.style.display = 'inline-flex';
+            cancelBtn.textContent = cancelText;
+          }
+          
+          confirmBtn.textContent = confirmText;
+          if (danger) {
+            confirmBtn.style.background = 'rgba(255, 69, 58, 0.2)';
+            confirmBtn.style.borderColor = 'rgba(255, 69, 58, 0.5)';
+            confirmBtn.style.color = 'var(--danger)';
+          } else {
+            confirmBtn.style.background = 'var(--accent)';
+            confirmBtn.style.borderColor = 'var(--accent)';
+            confirmBtn.style.color = 'white';
+          }
+          
+          overlay.classList.add('active');
+          
+          const cleanup = () => {
+            overlay.classList.remove('active');
+            confirmBtn.onclick = null;
+            cancelBtn.onclick = null;
+          };
+          
+          confirmBtn.onclick = () => {
+            cleanup();
+            if (type === 'prompt') resolve(inputEl.value);
+            else resolve(true);
+          };
+          
+          cancelBtn.onclick = () => {
+            cleanup();
+            if (type === 'prompt') resolve(null);
+            else resolve(false);
+          };
+        });
+      }
+    };
+
+    window.customAlert = (msg) => CustomDialog.show({ title: 'Notice', message: msg, type: 'alert' });
+    window.customConfirm = (msg) => CustomDialog.show({ title: 'Confirmation', message: msg, type: 'confirm', danger: true });
+    window.customPrompt = (title, msg, def) => CustomDialog.show({ title: title, message: msg, type: 'prompt', defaultValue: def });
+
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('upload-input');
-    const progressContainer = document.getElementById('progress-container');
-    const progressBar = document.getElementById('progress-bar');
-    const uploadBtn = document.querySelector('.upload-btn');
+    const uploadBtn = document.getElementById('upload-input') ? document.querySelector('.upload-btn') : null;
+    const batchDeleteBtn = document.getElementById('batch-delete-btn');
+    const batchRestoreBtn = document.getElementById('batch-restore-btn');
+    const batchPermanentDeleteBtn = document.getElementById('batch-permanent-delete-btn');
+    const selectAllCheckbox = document.getElementById('select-all');
+    const fileCheckboxes = document.querySelectorAll('.file-checkbox');
+    
+    // Get current path from breadcrumbs
+    const breadcrumbs = document.querySelector('.breadcrumbs');
+    const currentPath = breadcrumbs ? breadcrumbs.getAttribute('data-path') : '';
 
+    // Drag and Drop
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
       dropZone.addEventListener(eventName, preventDefaults, false);
       document.body.addEventListener(eventName, preventDefaults, false);
     });
 
-    function preventDefaults(e) {
-      e.preventDefault();
-      e.stopPropagation();
+    function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
+
+    ['dragenter', 'dragover'].forEach(eventName => dropZone.addEventListener(eventName, () => dropZone.classList.add('dragover'), false));
+    ['dragleave', 'drop'].forEach(eventName => dropZone.addEventListener(eventName, () => dropZone.classList.remove('dragover'), false));
+
+    if (fileInput) {
+      dropZone.addEventListener('drop', e => handleFiles(e.dataTransfer.files), false);
+      fileInput.addEventListener('change', e => handleFiles(e.target.files), false);
+    }
+    const folderInput = document.getElementById('upload-folder-input');
+    if (folderInput) {
+      folderInput.addEventListener('change', e => handleFiles(e.target.files), false);
     }
 
-    ['dragenter', 'dragover'].forEach(eventName => {
-      dropZone.addEventListener(eventName, () => dropZone.classList.add('dragover'), false);
+    // Multi-select Logic
+    function updateBatchDeleteVisibility() {
+      const selected = document.querySelectorAll('.file-checkbox:checked');
+      const hasSelection = selected.length > 0;
+      if (batchDeleteBtn) {
+         if (hasSelection) batchDeleteBtn.classList.add('visible');
+         else batchDeleteBtn.classList.remove('visible');
+      }
+      if (batchRestoreBtn) {
+         if (hasSelection) batchRestoreBtn.style.display = 'inline-flex';
+         else batchRestoreBtn.style.display = 'none';
+      }
+      if (batchPermanentDeleteBtn) {
+         if (hasSelection) batchPermanentDeleteBtn.classList.add('visible');
+         else batchPermanentDeleteBtn.classList.remove('visible');
+      }
+    }
+
+    if (selectAllCheckbox) {
+      selectAllCheckbox.addEventListener('change', (e) => {
+        fileCheckboxes.forEach(cb => {
+          if (!cb.disabled) cb.checked = e.target.checked;
+        });
+        updateBatchDeleteVisibility();
+      });
+    }
+
+    fileCheckboxes.forEach(cb => {
+      cb.addEventListener('change', () => {
+        const allChecked = Array.from(fileCheckboxes).every(c => c.checked || c.disabled);
+        if (selectAllCheckbox) selectAllCheckbox.checked = allChecked;
+        updateBatchDeleteVisibility();
+      });
     });
 
-    ['dragleave', 'drop'].forEach(eventName => {
-      dropZone.addEventListener(eventName, () => dropZone.classList.remove('dragover'), false);
-    });
-
-    dropZone.addEventListener('drop', handleDrop, false);
-    fileInput.addEventListener('change', handleFileSelect, false);
-
-    function handleDrop(e) {
-      const dt = e.dataTransfer;
-      const files = dt.files;
-      handleFiles(files);
-    }
-
-    function handleFileSelect(e) {
-      const files = e.target.files;
-      handleFiles(files);
-    }
-
+    const uploadOverlay = document.getElementById('upload-status-overlay');
+    const uploadFilename = document.getElementById('upload-filename');
+    const uploadSpeed = document.getElementById('upload-speed');
+    const progressBar = document.getElementById('progress-bar');
+    // Upload Files
     async function handleFiles(files) {
-      if (files.length === 0) return;
+      if (files.length === 0 || !uploadBtn) return;
       
-      progressContainer.style.display = 'block';
-      progressBar.style.width = '0%';
+      uploadOverlay.classList.add('active');
       uploadBtn.disabled = true;
       uploadBtn.style.opacity = '0.5';
       uploadBtn.innerText = 'Uploading...';
 
       let successCount = 0;
       let failCount = 0;
+      let totalBytes = 0;
+      for (let i = 0; i < files.length; i++) {
+        totalBytes += files[i].size;
+      }
+      
+      let totalLoadedBytesHistory = 0;
+      let lastTotalLoaded = 0;
+      let lastTime = Date.now();
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        try {
-          const response = await fetch('/upload', {
-            method: 'POST',
-            headers: {
-              'X-File-Name': encodeURIComponent(file.name),
-              'Content-Type': file.type || 'application/octet-stream',
-              'Content-Length': file.size.toString()
-            },
-            body: file
-          });
+        uploadFilename.textContent = \`Uploading (\${i+1}/\${files.length})...\`;
 
-          if (!response.ok) {
-            const err = await response.text();
-            throw new Error(err || 'Upload failed');
-          }
-          successCount++;
+        try {
+          await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+
+            xhr.upload.addEventListener('progress', (e) => {
+              if (e.lengthComputable) {
+                const totalLoaded = totalLoadedBytesHistory + e.loaded;
+                const percent = totalBytes > 0 ? (totalLoaded / totalBytes) * 100 : 100;
+                progressBar.style.width = percent + '%';
+                
+                const now = Date.now();
+                const timeDiff = (now - lastTime) / 1000; // seconds
+                if (timeDiff > 0.5) {
+                  const bytesDiff = totalLoaded - lastTotalLoaded;
+                  const speedBps = bytesDiff / timeDiff;
+                  const speedMBps = (speedBps / (1024 * 1024)).toFixed(2);
+                  uploadSpeed.textContent = \`\${speedMBps} MB/s - \${Math.round(percent)}%\`;
+                  
+                  lastTotalLoaded = totalLoaded;
+                  lastTime = now;
+                }
+              }
+            });
+
+            xhr.addEventListener('load', () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                successCount++;
+                totalLoadedBytesHistory += file.size;
+                resolve();
+              } else {
+                reject(new Error(xhr.responseText || 'Upload failed'));
+              }
+            });
+
+            xhr.addEventListener('error', () => reject(new Error('Network Error')));
+            xhr.addEventListener('abort', () => reject(new Error('Upload Aborted')));
+
+            xhr.open('POST', '/api/upload');
+            const targetName = file.webkitRelativePath ? file.webkitRelativePath : file.name;
+            xhr.setRequestHeader('X-File-Name', encodeURIComponent(targetName));
+            xhr.setRequestHeader('X-Current-Path', currentPath);
+            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+            xhr.send(file);
+          });
         } catch (error) {
           console.error('Error uploading', file.name, error);
-          alert(\`Failed to upload \${file.name}: \${error.message}\`);
+          await customAlert(\`Failed to upload \${file.name}: \${error.message}\`);
           failCount++;
         }
-        
-        // Update progress
-        const percent = ((i + 1) / files.length) * 100;
-        progressBar.style.width = percent + '%';
       }
 
-      uploadBtn.disabled = false;
-      uploadBtn.style.opacity = '1';
-      uploadBtn.innerHTML = '<svg style="width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;margin-right:0.5rem" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4m14-7l-5-5m0 0l-5 5m5-5v12"/></svg>Upload Files';
-      
+      uploadSpeed.textContent = 'Finishing...';
       setTimeout(() => {
-        progressContainer.style.display = 'none';
-        if (successCount > 0) {
-          window.location.reload();
-        }
+        uploadOverlay.classList.remove('active');
+        if (successCount > 0) window.location.reload();
       }, 500);
     }
+    
+    // Batch Actions
+    if (batchDeleteBtn) {
+      batchDeleteBtn.addEventListener('click', async () => {
+        const selected = Array.from(document.querySelectorAll('.file-checkbox:checked')).map(cb => cb.value);
+        if (selected.length === 0) return;
+        
+        batchDeleteBtn.disabled = true;
+        batchDeleteBtn.innerText = 'Moving to Trash...';
+        
+        try {
+          const res = await fetch('/api/trash-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: selected })
+          });
+          if (res.ok) window.location.reload();
+          else await customAlert('Trash failed: ' + await res.text());
+        } catch (err) {
+          await customAlert('Trash error: ' + err.message);
+        } finally {
+          batchDeleteBtn.disabled = false;
+          batchDeleteBtn.innerText = 'Delete';
+        }
+      });
+    }
+
+    if (batchPermanentDeleteBtn) {
+      batchPermanentDeleteBtn.addEventListener('click', async () => {
+        const selected = Array.from(document.querySelectorAll('.file-checkbox:checked')).map(cb => cb.value);
+        if (selected.length === 0 || !(await customConfirm(\`Permanently delete \${ selected.length } items? This cannot be undone.\`))) return;
+        
+        batchPermanentDeleteBtn.disabled = true;
+        batchPermanentDeleteBtn.innerText = 'Deleting...';
+        
+        try {
+          const res = await fetch('/api/delete-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: selected })
+          });
+          if (res.ok) window.location.reload();
+          else await customAlert('Delete failed: ' + await res.text());
+        } catch (err) {
+          await customAlert('Delete error: ' + err.message);
+        } finally {
+          batchPermanentDeleteBtn.disabled = false;
+          batchPermanentDeleteBtn.innerText = 'Delete Permanently';
+        }
+      });
+    }
+
+    if (batchRestoreBtn) {
+      batchRestoreBtn.addEventListener('click', async () => {
+        const selected = Array.from(document.querySelectorAll('.file-checkbox:checked')).map(cb => cb.value);
+        if (selected.length === 0) return;
+        
+        batchRestoreBtn.disabled = true;
+        batchRestoreBtn.innerText = 'Restoring...';
+        
+        try {
+          const res = await fetch('/api/restore-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: selected })
+          });
+          if (res.ok) window.location.reload();
+          else await customAlert('Restore failed: ' + await res.text());
+        } catch (err) {
+          await customAlert('Restore error: ' + err.message);
+        } finally {
+          batchRestoreBtn.disabled = false;
+          batchRestoreBtn.innerText = 'Restore Selected';
+        }
+      });
+    }
+
+    // Context Menu Actions (Rename / Delete)
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.context-menu-btn');
+      if (btn) {
+        const key = btn.getAttribute('data-key');
+        const isFolder = btn.getAttribute('data-is-folder') === 'true';
+        const isTrash = btn.getAttribute('data-is-trash') === 'true';
+        
+        if (isTrash) {
+            const action = await customPrompt('Options', \`Options for \${ key }\\nType 'restore' to restore, 'delete' to permanently delete:\`, 'restore');
+            if (action === 'restore') {
+               const res = await fetch('/api/restore-batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: [key] }) });
+               if (res.ok) window.location.reload(); else await customAlert('Restore failed: ' + await res.text());
+            } else if (action === 'delete') {
+               const res = await fetch('/api/delete-batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: [key] }) });
+               if (res.ok) window.location.reload(); else await customAlert('Delete failed: ' + await res.text());
+            }
+        } else {
+            let actionText = isFolder ? \`Options for \${ key }\\nType 'download' to zip, 'delete' to move to trash:\` : \`Options for \${ key }\\nType 'rename' to rename, 'delete' to move to trash:\`;
+            let defaultAction = isFolder ? 'download' : 'rename';
+            const action = await customPrompt('Options', actionText, defaultAction);
+            
+            if (action === 'download' && isFolder) {
+                downloadFolder(key);
+            } else if (action === 'delete') {
+                const res = await fetch('/api/trash-batch', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ keys: [key] })
+                });
+                if (res.ok) window.location.reload();
+                else await customAlert('Trash failed: ' + await res.text());
+            } else if (action === 'rename' && !isFolder) {
+                const currentName = key.split('/').pop();
+                const prefix = key.substring(0, key.lastIndexOf('/') + 1);
+                const newName = await customPrompt('Rename', 'Enter new name:', currentName);
+                if (newName && newName !== currentName) {
+                    const newKey = prefix + newName;
+                    const res = await fetch('/api/rename', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ oldKey: key, newKey: newKey })
+                    });
+                    if (res.ok) window.location.reload();
+                    else await customAlert('Rename failed: ' + await res.text());
+                }
+            } else if (action === 'rename' && isFolder) {
+                await customAlert('Folder rename is not supported.');
+            }
+        }
+      }
+    });
+
+    async function downloadFolder(prefix) {
+      try {
+        uploadOverlay.classList.add('active');
+        uploadFilename.textContent = 'Preparing...';
+        uploadSpeed.textContent = 'Fetching file list...';
+        progressBar.style.width = '10%';
+        
+        const res = await fetch('/api/list-folder?prefix=' + encodeURIComponent(prefix));
+        if (!res.ok) throw new Error('Failed to list folder');
+        const data = await res.json();
+        const keys = data.keys;
+        
+        if (keys.length === 0) {
+           await customAlert('Folder is empty');
+           uploadOverlay.classList.remove('active');
+           return;
+        }
+
+        const zipData = {};
+        for (let i = 0; i < keys.length; i++) {
+           const key = keys[i];
+           uploadFilename.textContent = \`Downloading (\${i+1}/\${keys.length})...\`;
+           progressBar.style.width = Math.max(10, (i / keys.length) * 90) + '%';
+           const fileRes = await fetch('/' + encodeURIComponent(key));
+           const arrayBuffer = await fileRes.arrayBuffer();
+           // Remove prefix to get relative path inside zip
+           const relativePath = key.startsWith(prefix) ? key.slice(prefix.length) : key;
+           if (relativePath) {
+              zipData[relativePath] = new Uint8Array(arrayBuffer);
+           }
+        }
+        
+        uploadFilename.textContent = 'Zipping...';
+        uploadSpeed.textContent = '';
+        progressBar.style.width = '95%';
+        
+        // Zero-dependency pure JS zip via fflate
+        const zippedContent = fflate.zipSync(zipData);
+        const blob = new Blob([zippedContent], { type: 'application/zip' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        let pName = prefix;
+        if (pName.endsWith('/')) pName = pName.slice(0, -1);
+        pName = pName.split('/').pop() || 'Archive';
+        a.download = pName + '.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        progressBar.style.width = '100%';
+        setTimeout(() => uploadOverlay.classList.remove('active'), 1000);
+      } catch (err) {
+        await customAlert('Download error: ' + err.message);
+        uploadOverlay.classList.remove('active');
+      }
+    }
+
   </script>
 </body>
 </html>`;
