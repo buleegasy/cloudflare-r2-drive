@@ -3,6 +3,12 @@ export default {
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname.slice(1));
 
+    if (request.method === 'GET' && path === 'ads.txt') {
+      return new Response('google.com, pub-6423202281776515, DIRECT, f08c47fec0942fa0', {
+        headers: { 'Content-Type': 'text/plain' }
+      });
+    }
+
     if (request.method === 'POST' && path === 'api/upload') {
       const filename = request.headers.get('X-File-Name');
       const currentPath = request.headers.get('X-Current-Path') || '';
@@ -165,6 +171,18 @@ export default {
       }
       const list = await env.BUCKET.list(options);
       const isTrash = path.startsWith('.trash/');
+      const isPartial = request.headers.get('X-Partial') === 'true';
+
+      if (isPartial) {
+        return new Response(JSON.stringify({
+          rows: generateTableRows(list, path, isTrash),
+          breadcrumbs: generateBreadcrumbs(path),
+          path: path
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
       return new Response(generateHTML(list, path, isTrash), {
         headers: {
           'Content-Type': 'text/html;charset=UTF-8'
@@ -231,44 +249,43 @@ function getFolderIcon() {
 }
 
 function generateBreadcrumbs(currentPath) {
-  if (!currentPath) return '<div class="breadcrumbs" data-path=""><span>Home</span></div>';
+  const homeIcon = `<svg style="width:14px;height:14px;flex-shrink:0;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
+  if (!currentPath) {
+    return `<div class="breadcrumbs" data-path=""><span class="breadcrumb-pill breadcrumb-pill-current">${homeIcon}<span>Home</span></span></div>`;
+  }
   const parts = currentPath.split('/').filter(Boolean);
-  let breadcrumbStr = '<a href="/" class="breadcrumb-link">Home</a>';
+  let breadcrumbStr = `<a href="/" class="breadcrumb-pill breadcrumb-pill-link" data-nav="true">${homeIcon}<span>Home</span></a>`;
   let pathAccumulator = '';
   for (let i = 0; i < parts.length; i++) {
     pathAccumulator += parts[i] + '/';
-    breadcrumbStr += ` <span class="separator">/</span> `;
+    breadcrumbStr += `<span class="breadcrumb-sep">›</span>`;
     if (i === parts.length - 1) {
-      breadcrumbStr += `<span>${parts[i]}</span>`;
+      breadcrumbStr += `<span class="breadcrumb-pill breadcrumb-pill-current"><span>${parts[i]}</span></span>`;
     } else {
-      breadcrumbStr += `<a href="/${encodeURIComponent(pathAccumulator)}" class="breadcrumb-link">${parts[i]}</a>`;
+      breadcrumbStr += `<a href="/${encodeURIComponent(pathAccumulator)}" class="breadcrumb-pill breadcrumb-pill-link" data-nav="true"><span>${parts[i]}</span></a>`;
     }
   }
   return `<div class="breadcrumbs" data-path="${currentPath}">${breadcrumbStr}</div>`;
 }
 
-function generateHTML(list, currentPath = '', isTrash = false) {
+function generateTableRows(list, currentPath = '', isTrash = false) {
   let listRows = '';
   const objects = list.objects || [];
   const prefixes = list.delimitedPrefixes || [];
 
   if (currentPath !== '') {
-    const parentPath = currentPath.split('/').filter(Boolean).slice(0, -1).join('/');
+    const pathParts = currentPath.split('/').filter(Boolean);
+    const parentPath = pathParts.slice(0, -1).join('/');
     const parentHref = parentPath ? '/' + encodeURIComponent(parentPath + '/') : '/';
+    const parentName = parentPath ? parentPath.split('/').pop() : 'Home';
     listRows += `
-      <tr class="folder-row">
-        <td>
-          <div class="row-content">
-            <input type="checkbox" disabled style="opacity:0;" />
-            <a href="${parentHref}" class="file-link">
-              <svg class="file-icon" viewBox="0 0 24 24"><path d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
-              <span class="file-name">..</span>
-            </a>
-          </div>
+      <tr class="back-row">
+        <td colspan="4">
+          <a href="${parentHref}" class="back-btn" data-nav="true">
+            <svg style="width:16px;height:16px;flex-shrink:0;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m0 0l7 7m-7-7l7-7"/></svg>
+            <span>Back to <strong>${parentName}</strong></span>
+          </a>
         </td>
-        <td class="size hide-mobile">-</td>
-        <td class="date hide-mobile">-</td>
-        <td></td>
       </tr>
     `;
   }
@@ -280,7 +297,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
         <td>
           <div class="row-content">
             <input type="checkbox" class="file-checkbox folder-checkbox" value="${prefix}" />
-            <a href="/${encodeURIComponent(prefix)}" class="file-link">
+            <a href="/${encodeURIComponent(prefix)}" class="file-link" data-nav="true">
               ${getFolderIcon()}
               <span class="file-name">${folderName}</span>
             </a>
@@ -357,38 +374,64 @@ function generateHTML(list, currentPath = '', isTrash = false) {
       </tr>
     `;
   }
+  return listRows;
+}
+
+function generateHTML(list, currentPath = '', isTrash = false) {
+  let listRows = generateTableRows(list, currentPath, isTrash);
+
+  if (listRows === '') {
+    listRows = `
+      <tr>
+        <td colspan="4">
+          <div class="empty-state">
+            <svg style="width: 48px; height: 48px; margin-bottom: 1rem; opacity: 0.5; stroke: currentColor; fill: none; stroke-width: 2;" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+            </svg>
+            <p>This folder is completely empty</p>
+          </div>
+        </td>
+      </tr>
+    `;
+  }
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="google-adsense-account" content="ca-pub-6423202281776515">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cloud Drive</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6423202281776515"
+     crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
   <style>
     :root {
       --text-main: #ffffff;
-      --text-muted: rgba(255, 255, 255, 0.6);
-      --accent: #0a84ff;
+      --text-muted: rgba(255, 255, 255, 0.5);
+      --accent: #6366f1; /* Buleecloud Indigo */
+      --accent-secondary: #ec4899; /* Buleecloud Pink */
+      --bg-color: #030303;
+      --glass-bg: rgba(255, 255, 255, 0.04);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      --glass-hover: rgba(255, 255, 255, 0.1);
       --danger: #ff453a;
-      --glass-bg: rgba(255, 255, 255, 0.08); /* slight lightness */
-      --glass-border: rgba(255, 255, 255, 0.15);
-      --glass-hover: rgba(255, 255, 255, 0.12);
     }
     
     * { box-sizing: border-box; margin: 0; padding: 0; }
     
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
-      background-color: #000;
+      font-family: 'Outfit', sans-serif;
+      background-color: var(--bg-color);
       color: var(--text-main);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 4rem 1.5rem;
+      padding: 5rem 1.5rem;
       -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
     }
 
     /* Vibrant abstract mesh gradient background */
@@ -415,8 +458,8 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     
     .container {
       width: 100%;
-      max-width: 960px;
-      animation: fadeIn 0.8s ease-out;
+      max-width: 1000px;
+      animation: fadeIn 1s cubic-bezier(0.2, 0.8, 0.2, 1);
       position: relative;
       z-index: 10;
     }
@@ -432,26 +475,26 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     }
     
     .header h1 {
-      font-size: clamp(4rem, 10vw, 7rem);
-      font-weight: 500;
-      letter-spacing: -0.02em;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.6) 100%);
+      font-size: clamp(3rem, 12vw, 6.5rem);
+      font-weight: 700;
+      letter-spacing: -3px;
+      background: linear-gradient(180deg, #fff 40%, rgba(255, 255, 255, 0.5) 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       margin-bottom: 0.5rem;
-      text-shadow: none;
+      line-height: 0.9;
     }
     
     /* Liquid Glass Class */
     .liquid-glass {
       background: var(--glass-bg);
-      backdrop-filter: blur(30px) saturate(200%);
-      -webkit-backdrop-filter: blur(30px) saturate(200%);
+      backdrop-filter: blur(25px) saturate(180%);
+      -webkit-backdrop-filter: blur(25px) saturate(180%);
       border: 1px solid var(--glass-border);
       box-shadow: 
-        0 24px 48px rgba(0, 0, 0, 0.2),
-        inset 0 1px 0 rgba(255, 255, 255, 0.2);
-      border-radius: 24px;
+        0 30px 60px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      border-radius: 32px;
     }
 
     .action-bar {
@@ -476,27 +519,27 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     }
 
     .upload-btn, .batch-delete-btn {
-      background: rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
       color: var(--text-main);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      padding: 0.6rem 1.25rem;
-      border-radius: 999px; /* full pill Apple style */
-      font-weight: 500;
-      font-size: 0.95rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 0.7rem 1.5rem;
+      border-radius: 16px;
+      font-weight: 600;
+      font-size: 0.9rem;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
-      transition: all 0.3s cubic-bezier(0.25, 1, 0.5, 1);
-      backdrop-filter: blur(20px) saturate(150%);
-      -webkit-backdrop-filter: blur(20px) saturate(150%);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      gap: 0.6rem;
+      transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
     }
     
     .upload-btn:hover, .batch-delete-btn:hover {
-      background: rgba(255, 255, 255, 0.2);
-      transform: translateY(-2px);
-      box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+      background: rgba(255, 255, 255, 0.12);
+      transform: translateY(-4px) scale(1.02);
+      border-color: rgba(255, 255, 255, 0.3);
+      box-shadow: 0 10px 20px rgba(0,0,0,0.2);
     }
     .upload-btn:active, .batch-delete-btn:active {
       transform: translateY(0);
@@ -515,23 +558,67 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     .breadcrumbs {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
-      font-size: 1rem;
+      gap: 0.35rem;
+      font-size: 0.9rem;
       font-weight: 500;
-      color: var(--text-muted);
+      flex-wrap: wrap;
     }
-    .breadcrumb-link {
+    .breadcrumb-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.3rem 0.75rem;
+      border-radius: 999px;
+      white-space: nowrap;
+      transition: background 0.2s ease, opacity 0.2s ease;
+    }
+    .breadcrumb-pill-link {
       color: var(--text-main);
       text-decoration: none;
-      transition: color 0.2s, opacity 0.2s;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.1);
     }
-    .breadcrumb-link:hover {
-      opacity: 0.7;
+    .breadcrumb-pill-link:hover {
+      background: rgba(255,255,255,0.18);
+      border-color: rgba(255,255,255,0.25);
     }
-    .separator {
+    .breadcrumb-pill-current {
+      color: var(--text-main);
+      background: rgba(10,132,255,0.18);
+      border: 1px solid rgba(10,132,255,0.35);
+    }
+    .breadcrumb-sep {
       color: rgba(255,255,255,0.3);
-      font-weight: 300;
+      font-size: 1.1rem;
+      line-height: 1;
+      user-select: none;
     }
+
+    /* Back row */
+    .back-row td {
+      padding: 0.6rem 1.5rem !important;
+      border-bottom: 1px solid rgba(255,255,255,0.08) !important;
+    }
+    .back-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.6rem;
+      color: var(--text-main);
+      text-decoration: none;
+      font-size: 0.92rem;
+      font-weight: 500;
+      padding: 0.5rem 1.2rem;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      transition: all 0.3s ease;
+    }
+    .back-btn:hover {
+      background: rgba(255,255,255,0.1);
+      border-color: rgba(255,255,255,0.3);
+      transform: translateX(-5px);
+    }
+    .back-btn strong { font-weight: 700; }
     
     .row-content {
       display: flex;
@@ -767,9 +854,9 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     .progress-bar {
       height: 100%;
       width: 0%;
-      background: linear-gradient(90deg, #32d74b, #30b0c7);
+      background: linear-gradient(90deg, var(--accent), var(--accent-secondary));
       transition: width 0.1s linear;
-      box-shadow: 0 0 10px rgba(50, 215, 75, 0.5);
+      box-shadow: 0 0 15px var(--accent);
     }
     
     @media (max-width: 640px) {
@@ -883,7 +970,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
 <body>
   <div class="mesh-bg"></div>
   <div class="container">
-    <a href="/.trash/" class="trash-link-corner">
+    <a href="/.trash/" class="trash-link-corner" data-nav="true">
       <svg style="width:16px;height:16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>Trash 
     </a>
     <div class="header">
@@ -891,7 +978,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     </div>
     
     <div class="action-bar liquid-glass">
-      <div style="display:flex; align-items:center; gap: 1rem;">
+      <div style="display:flex; align-items:center; gap: 1rem;" class="breadcrumbs-wrapper">
         ${generateBreadcrumbs(currentPath)}
       </div>
       <div class="action-buttons">
@@ -1063,7 +1150,36 @@ function generateHTML(list, currentPath = '', isTrash = false) {
     const selectAllCheckbox = document.getElementById('select-all');
     const fileCheckboxes = document.querySelectorAll('.file-checkbox');
     
-    // Get current path from breadcrumbs
+    // SPA Navigation
+async function navigateTo(path, pushState = true) {
+  if (pushState) history.pushState({ path }, '', path);
+  try {
+    const response = await fetch(path, { headers: { 'X-Partial': 'true' } });
+    if (!response.ok) throw new Error('Navigation failed');
+    const data = await response.json();
+    document.querySelector('.file-list tbody').innerHTML = data.rows;
+    document.querySelector('.breadcrumbs-wrapper').innerHTML = data.breadcrumbs;
+    const selectAll = document.getElementById('select-all');
+    if (selectAll) selectAll.checked = false;
+    updateBatchDeleteVisibility();
+  } catch (err) {
+    console.error('SPA Navigation error:', err);
+    if (pushState) window.location.href = path;
+  }
+}
+async function refreshView() { await navigateTo(window.location.pathname, false); }
+window.addEventListener('popstate', () => navigateTo(window.location.pathname, false));
+
+// Event delegation for navigation links
+document.addEventListener('click', (e) => {
+  const navLink = e.target.closest('a[data-nav="true"]');
+  if (navLink) {
+    e.preventDefault();
+    navigateTo(navLink.getAttribute('href'));
+  }
+});
+
+// Get current path from breadcrumbs
     const breadcrumbs = document.querySelector('.breadcrumbs');
     const currentPath = breadcrumbs ? breadcrumbs.getAttribute('data-path') : '';
 
@@ -1202,9 +1318,9 @@ function generateHTML(list, currentPath = '', isTrash = false) {
       }
 
       uploadSpeed.textContent = 'Finishing...';
-      setTimeout(() => {
+      setTimeout(async () => {
         uploadOverlay.classList.remove('active');
-        if (successCount > 0) window.location.reload();
+        if (successCount > 0) await refreshView();
       }, 500);
     }
     
@@ -1223,7 +1339,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ keys: selected })
           });
-          if (res.ok) window.location.reload();
+          if (res.ok) await refreshView();
           else await customAlert('Trash failed: ' + await res.text());
         } catch (err) {
           await customAlert('Trash error: ' + err.message);
@@ -1248,7 +1364,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ keys: selected })
           });
-          if (res.ok) window.location.reload();
+          if (res.ok) await refreshView();
           else await customAlert('Delete failed: ' + await res.text());
         } catch (err) {
           await customAlert('Delete error: ' + err.message);
@@ -1273,7 +1389,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ keys: selected })
           });
-          if (res.ok) window.location.reload();
+          if (res.ok) await refreshView();
           else await customAlert('Restore failed: ' + await res.text());
         } catch (err) {
           await customAlert('Restore error: ' + err.message);
@@ -1296,10 +1412,10 @@ function generateHTML(list, currentPath = '', isTrash = false) {
             const action = await customPrompt('Options', \`Options for \${ key }\\nType 'restore' to restore, 'delete' to permanently delete:\`, 'restore');
             if (action === 'restore') {
                const res = await fetch('/api/restore-batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: [key] }) });
-               if (res.ok) window.location.reload(); else await customAlert('Restore failed: ' + await res.text());
+               if (res.ok) await refreshView(); else await customAlert('Restore failed: ' + await res.text());
             } else if (action === 'delete') {
                const res = await fetch('/api/delete-batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: [key] }) });
-               if (res.ok) window.location.reload(); else await customAlert('Delete failed: ' + await res.text());
+               if (res.ok) await refreshView(); else await customAlert('Delete failed: ' + await res.text());
             }
         } else {
             const filename = key.split('/').pop();
@@ -1343,7 +1459,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ keys: [key] })
                 });
-                if (res.ok) window.location.reload();
+                if (res.ok) await refreshView();
                 else await customAlert('Trash failed: ' + await res.text());
             } else if (action === 'rename' && !isFolder) {
                 const currentName = key.split('/').pop();
@@ -1356,7 +1472,7 @@ function generateHTML(list, currentPath = '', isTrash = false) {
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ oldKey: key, newKey: newKey })
                     });
-                    if (res.ok) window.location.reload();
+                    if (res.ok) await refreshView();
                     else await customAlert('Rename failed: ' + await res.text());
                 }
             } else if (action === 'rename' && isFolder) {
